@@ -1,0 +1,201 @@
+1. CoordinationAgent (Central Orchestrator)
+from uagents import Agent, Context, Model
+
+coordination_agent = Agent(name="coordination_agent", seed="coordination_seed")
+
+class HTTPRequest(Model):
+    type: str
+    data: dict
+
+class ComplianceMessage(Model):
+    source: str
+    payload: dict
+
+@coordination_agent.on_event("startup")
+async def on_startup(ctx: Context):
+    ctx.logger.info("🚀 CoordinationAgent is up")
+
+@coordination_agent.protocol("http", path="/compliance", method="POST")
+async def handle_http(ctx: Context, req: HTTPRequest):
+    t = req.type.lower()
+    if t == "transaction":
+        await ctx.send("AMLAlertAgent", req.data)
+    elif t == "kyc":
+        await ctx.send("KYCValidatorAgent", req.data)
+    elif t == "reg_fetch":
+        await ctx.send("RegWatcherAgent", {})
+    else:
+        ctx.logger.warn(f"Unknown type: {req.type}")
+    return {"status":"started","routed_to":req.type}
+
+@coordination_agent.on_message(model=ComplianceMessage)
+async def handle_compliance(ctx: Context, sender: str, msg: ComplianceMessage):
+    ctx.logger.info(f"📨 Received from {msg.source}: {msg.payload}")
+
+2. RegWatcherAgent (Regulation Monitor)
+
+from uagents import Agent, Context, Model
+import requests
+from bs4 import BeautifulSoup
+
+class ComplianceMessage(Model): source: str; payload: dict
+reg_watcher_agent = Agent(name="RegWatcherAgent", seed="reg_fetch_seed")
+
+@reg_watcher_agent.on_event("startup")
+async def fetch_reg_updates(ctx: Context):
+    sources = {"CBUAE": "https://www.centralbank.ae/...rss",
+               "DFSA": "https://www.difc.ae/news/rss",
+               "ADGM": "https://www.adgm.com/.../rss.xml"}
+    updates = []
+    for name,url in sources.items():
+        try:
+            resp=requests.get(url,timeout=5)
+            feed=BeautifulSoup(resp.text,"xml")
+            for item in feed.find_all("item")[:3]:
+                updates.append({"regulator":name,
+                                "title":item.title.text,
+                                "link":item.link.text})
+        except Exception as e:
+            ctx.logger.error(f"Fetch failed {name}: {e}")
+    await ctx.send("coordination_agent",ComplianceMessage(source="RegWatcherAgent",payload={"updates":updates}))
+
+3. AMLAlertAgent (Transaction Monitor)
+
+from uagents import Agent, Context, Model
+
+class Transaction(Model): tx_id: str; details: dict
+class ComplianceMessage(Model): source: str; payload: dict
+aml_agent = Agent(name="AMLAlertAgent", seed="aml_seed")
+
+@aml_agent.on_message(model=Transaction)
+async def detect_aml(ctx: Context, sender: str, msg: Transaction):
+    if msg.details.get("amount",0)>100000:
+        alert={"tx_id":msg.tx_id,"issues":["High-value"]}
+        await ctx.send("coordination_agent",ComplianceMessage(source="AMLAlertAgent",payload={"alert":alert}))
+        ctx.logger.info(f"🚩 AML alert {msg.tx_id}")
+    else:
+        ctx.logger.debug(f"✔ Tx {msg.tx_id} clean")
+
+
+
+4. KYCValidatorAgent (Identity Screening)
+
+from uagents import Agent, Context, Model
+
+class KYCRequest(Model):
+    user_id: str
+    doc_data: dict
+
+class ComplianceMessage(Model):
+    source: str
+    payload: dict
+
+kyc_agent = Agent(name="KYCValidatorAgent", seed="kyc_seed")
+SANCTION_LIST = {"EvilCorp"}
+PEP_LIST = {"PoliticianA"}
+
+@kyc_agent.on_message(model=KYCRequest)
+async def validate(ctx: Context, sender: str, msg: KYCRequest):
+    issues = []
+    if msg.user_id in SANCTION_LIST:
+        issues.append("Sanction hit")
+    if msg.user_id in PEP_LIST:
+        issues.append("PEP hit")
+    result = {"user_id": msg.user_id, "passed": not issues, "issues": issues}
+    await ctx.send(
+      "coordination_agent",
+      ComplianceMessage(source="KYCValidatorAgent", payload={"kyc_result": result})
+    )
+    ctx.logger.info(f"{'✅' if not issues else '⚠️'} KYC {msg.user_id}")
+
+
+5. RiskScorerAgent (Risk Aggregator)
+from uagents import Agent, Context, Model
+
+class ComplianceMessage(Model):
+    source: str
+    payload: dict
+
+risk_agent = Agent(name="RiskScorerAgent", seed="risk_scorer_seed")
+
+@risk_agent.on_message(model=ComplianceMessage)
+async def score_risk(ctx: Context, sender: str, msg: ComplianceMessage):
+    score = 0.1
+    details = {"source": msg.source}
+
+    # AML alerts
+    alert = msg.payload.get("alert")
+    if alert:
+        score += 0.5
+        details["aml_issues"] = alert.get("issues")
+
+    # KYC failures
+    kyc = msg.payload.get("kyc_result")
+    if kyc and not kyc.get("passed", True):
+        score += 0.3
+        details["kyc_issues"] = kyc.get("issues")
+
+    score = min(score, 1.0)
+
+    # Forward scored message
+    await ctx.send(
+        "coordination_agent",
+        ComplianceMessage(source="RiskScorerAgent", payload={"risk_score": score, "details": details})
+    )
+    ctx.logger.info(f"🔢 Risk score: {score}")
+
+6. ReportGenAgent (Report Builder)
+
+import uuid
+from datetime import datetime
+from uagents import Agent, Context, Model
+
+class ComplianceMessage(Model):
+    source: str
+    payload: dict
+
+class Report(Model):
+    report_id: str
+    timestamp: str
+    entries: list
+
+report_agent = Agent(name="ReportGenAgent", seed="report_gen_seed")
+
+# In-memory store
+ENTRIES = []
+
+@report_agent.on_message(model=ComplianceMessage)
+async def compile_report(ctx: Context, sender: str, msg: ComplianceMessage):
+    ENTRIES.append({
+        "source": msg.source,
+        "payload": msg.payload,
+        "received_at": datetime.utcnow().isoformat()
+    })
+
+    report = Report(
+        report_id=str(uuid.uuid4()),
+        timestamp=datetime.utcnow().isoformat(),
+        entries=ENTRIES.copy()
+    )
+
+    await ctx.send("NotifierAgent", report)
+    ctx.logger.info(f"📑 Generated report {report.report_id} ({len(ENTRIES)} entries)")
+
+7. NotifierAgent (Dispatch) import requests
+
+import requests
+from uagents import Agent, Context, Model
+
+class Report(Model):
+    report_id: str
+    timestamp: str
+    entries: list
+
+notifier_agent = Agent(name="NotifierAgent", seed="notifier_seed")
+
+@notifier_agent.on_message(model=Report)
+async def dispatch_report(ctx: Context, sender: str, report: Report):
+    ctx.logger.info(f"✅ Notifier received report {report.report_id} with {len(report.entries)} entries")
+    # Optional: forward to external webhook
+    # requests.post("https://dashboard/api/reports", json=report.dict(), timeout=5)
+
