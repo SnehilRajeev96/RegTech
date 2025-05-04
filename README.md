@@ -1,4 +1,10 @@
 # RegTech
+
+![tag: innovationlab](https://img.shields.io/badge/innovationlab-3DBBD3)
+
+This project was developed for the Innovation Lab by Fetch.ai...
+
+
 **1. CoordinationAgent**
 
 **Purpose**
